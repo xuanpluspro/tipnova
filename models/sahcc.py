@@ -81,19 +81,47 @@ class DirectionalDetailGate(nn.Module):
         return detail * (2.0 * torch.sigmoid(self.project(response)))
 
 
+class ContextGuidedDetail(nn.Module):
+    """Refine stride-8 detail with a gate predicted at stride 16."""
+
+    def __init__(self, channels: int):
+        super().__init__()
+        width = min(32, channels)
+        self.reduce = nn.Conv2d(channels, width, 1, bias=False)
+        self.gate = nn.Conv2d(channels, width, 1)
+        self.expand = nn.Conv2d(width, channels, 1, bias=False)
+        # Start from the original decoder. Only this projection is zeroed:
+        # it can receive a gradient immediately from the nonzero gated detail.
+        nn.init.zeros_(self.expand.weight)
+
+    def forward(self, detail: torch.Tensor, context: torch.Tensor):
+        reduced = self.reduce(detail)
+        local_mean = torch.nn.functional.avg_pool2d(
+            reduced, kernel_size=3, stride=1, padding=1, count_include_pad=False
+        )
+        gain = torch.nn.functional.interpolate(
+            self.gate(context).sigmoid(), size=reduced.shape[-2:], mode="nearest"
+        )
+        return detail + self.expand((reduced - local_mean) * gain)
+
+
 class Decoder(nn.Module):
     def __init__(self, c4: int = 512, c5: int = 512, out_channels: int = 256):
         super().__init__()
         self.p5_1 = nn.Conv2d(c5, out_channels, kernel_size=1)
         self.p4_1 = nn.Conv2d(c4, out_channels, kernel_size=1)
         self.detail_gate = nn.Identity()
+        self.context_detail = None
         self.up = nn.Upsample(scale_factor=2, mode="nearest")
         self.p4_2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
 
     def forward(self, feats):
         c4, c5 = feats[2], feats[3]
         p5 = self.p5_1(c5)
-        return self.p4_2(self.detail_gate(self.p4_1(c4)) + self.up(p5))
+        p4 = self.detail_gate(self.p4_1(c4))
+        if self.context_detail is not None:
+            p4 = self.context_detail(p4, p5)
+        return self.p4_2(p4 + self.up(p5))
 
 
 class P2PNet(nn.Module):
@@ -110,6 +138,7 @@ class P2PNet(nn.Module):
         anchor_pyramid_level: int = 3,
         offset_scale: float = 100.0,
         directional_detail: bool = False,
+        context_detail: bool = False,
     ):
         super().__init__()
         self.backbone = backbone
@@ -124,9 +153,15 @@ class P2PNet(nn.Module):
         )
         self.anchor_points = AnchorPoints(pyramid_level=anchor_pyramid_level, row=row, line=line)
 
+        if directional_detail and context_detail:
+            raise ValueError("DDG and context-guided detail are separate variants")
         if directional_detail:
             with torch.random.fork_rng(devices=[]):
                 self.decoder.detail_gate = DirectionalDetailGate(decoder_out_channels)
+
+        if context_detail:
+            with torch.random.fork_rng(devices=[]):
+                self.decoder.context_detail = ContextGuidedDetail(decoder_out_channels)
 
     def forward(self, samples: torch.Tensor):
         feats = self.backbone(samples)

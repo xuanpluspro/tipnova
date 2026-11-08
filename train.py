@@ -27,7 +27,7 @@ def parser():
     p.add_argument('--data-path', type=Path, default=ROOT/'data/RiceW3999')
     p.add_argument('--pretrained', type=Path, default=ROOT/'pretrained/vgg16_bn-6c64b313.pth')
     p.add_argument('--scratch', action='store_true', help='Explicitly train without ImageNet initialization')
-    p.add_argument('--tag', default='ricew3999_tipnova_ep50_bs32')
+    p.add_argument('--tag', default='ricew3999_tipfuse_ep50_bs32')
     p.add_argument('--output-root', type=Path, default=ROOT/'exp')
     p.add_argument('--batch-size', type=int, default=32)
     p.add_argument('--epochs', type=int, default=50)
@@ -41,8 +41,11 @@ def parser():
     p.add_argument('--weight-decay', type=float, default=1e-4)
     p.add_argument('--clip-grad', type=float, default=.1)
     p.add_argument('--point-weight', type=float, default=.0002)
-    p.add_argument('--directional-detail', action=argparse.BooleanOptionalAction, default=True,
-                   help='Directional detail gate before C4/C5 fusion (enabled by default)')
+    architecture = p.add_mutually_exclusive_group()
+    architecture.add_argument('--variant', choices=['tipfuse', 'ddg', 'sah'],
+                              help='Network variant (default: tipfuse)')
+    architecture.add_argument('--directional-detail', action=argparse.BooleanOptionalAction,
+                              default=None, help='Legacy alias: on=ddg, off=sah')
     p.add_argument('--matcher', choices=['sah','baseline'], default='sah')
     p.add_argument('--point-source', choices=['anchor_points','pred_points'], default='anchor_points')
     p.add_argument('--neighbors', type=int, default=4, help='k nearest other GT points for spacing')
@@ -105,7 +108,11 @@ def main(args):
     state = checkpointing.load(resume) if resume else None
     # Full checkpoint already contains the backbone: no pretrained dependency on resume.
     pretrained = None if state or args.scratch else args.pretrained
-    model = SAHCC(ModelConfig(directional_detail=args.directional_detail), pretrained).to(device)
+    variant = args.variant
+    if variant is None:
+        variant = {None: 'tipfuse', True: 'ddg', False: 'sah'}[args.directional_detail]
+    model = SAHCC(ModelConfig(directional_detail=variant == 'ddg',
+                              context_detail=variant == 'tipfuse'), pretrained).to(device)
     criterion = PointCriterion(args).to(device)
     optimizer = torch.optim.AdamW([
         dict(params=[p for n,p in model.named_parameters() if not n.startswith('backbone.')]),
@@ -143,7 +150,7 @@ def main(args):
         (output/'resume_config.json').write_text(json.dumps(config, indent=2)+'\n')
     logger.info(f'Train={len(training)} val={len(validation)} | patch={args.patch_size} | '
                 f'Params={sum(p.numel() for p in model.parameters())/1e6:.2f}M | '
-                f'directional_detail={args.directional_detail} | matcher={args.matcher} source={args.point_source} | {config["precision"]}')
+                f'variant={variant} | matcher={args.matcher} source={args.point_source} | {config["precision"]}')
     if start >= args.epochs:
         logger.info('Requested total epochs already completed')
         return

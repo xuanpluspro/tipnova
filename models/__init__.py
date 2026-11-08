@@ -14,11 +14,14 @@ class ModelConfig:
     anchor_pyramid_level: int = 3
     offset_scale: float = 100.
     directional_detail: bool = False
+    context_detail: bool = False
 
     def to_dict(self):
         result = asdict(self)
         if not self.directional_detail:
             result.pop("directional_detail")  # Retain legacy checkpoint config.
+        if not self.context_detail:
+            result.pop("context_detail")
         return result
 
 

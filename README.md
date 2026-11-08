@@ -1,6 +1,35 @@
+# TipFuse experimental branch
+
+TipFuse uses SAHCC anchors, point heads, matching and losses. Inspired by CSD, it
+extracts a local detail residual, but conditions it using the existing C5 branch.
+It does not use SPD-PAFPN or the full UniGC CSD block.
+
+The stride-8 C4 projection is reduced to 32 channels, then a 3×3 local mean is
+subtracted. A sigmoid gate is generated from stride-16 C5 and upsampled. The
+gated detail is projected back to 256 channels and added to C4 before C4/C5
+fusion. Only the final projection is zero-initialized. At the default widths
+TipFuse adds 24,608 parameters over the SAH baseline. Runtime and accuracy
+require GPU measurements.
+
+```bash
+BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh tipfuse_ep50_bs40 --variant tipfuse
+BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh sah_control_ep50_bs40 --variant sah
+BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh ddg_control_ep50_bs40 --variant ddg
+```
+
+TipFuse is the default on this branch. Use distinct experiment tags and the same
+data, pretrained weights, seed and precision. Resume with the same variant.
+Evaluate MAE, RMSE, F1@4/8/16px, seconds per epoch and peak GPU memory.
+The local evaluate.py and infer.py reconstruct the variant from model_config.
+The separate leaf-tip-inference repository does not include TipFuse yet.
+
+CSD reference: [UniGC implementation](https://github.com/xiaofengxie-dl/UniGC/blob/main/models/csd_p2pnet/models/csd_block.py).
+
+---
+
 # TipNova
 
-TipNova 是基于 SAHCC 的植物叶尖定位与计数模型，在 C4/C5 融合前加入方向细节门控（DDG）。训练默认开启 DDG，可用 `--no-directional-detail` 得到同代码基线。
+TipNova 是基于 SAHCC 的植物叶尖定位与计数模型，在 C4/C5 融合前加入方向细节门控（DDG）。在本实验分支可用 `--variant ddg` 运行。
 
 数据集 RiceW3999：FoMo4Wheat Rice Leaf 1,700 张水稻图像、Li 等（2023）500 张小麦图像、Yang 等（2025）1,799 张小麦图像。沿用原划分（训练 3,429 张，验证 570 张），支持分来源指标。数据与权重不随仓库分发。
 
@@ -176,7 +205,7 @@ SAH 保留训练 float32 精度下的重复坐标检查，错误会显示具体�
 
 ```bash
 BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh sah_baseline_ep50_bs40 --no-directional-detail
-BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh tipnova_ep50_bs40
+BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh tipnova_ep50_bs40 --variant ddg
 ```
 
-比较同一数据划分、训练配置和验证协议下的 MAE、RMSE、F1@4/8/16px 及推理耗时。训练默认开启门控；旧基线检查点仍可加载评估，续训需显式传入 `--no-directional-detail`。新变体从相同 ImageNet 初始化独立训练，续训须保留开关。仓库内 evaluate.py / infer.py 从检查点自动恢复结构。独立 leaf-tip-inference 仓库需单独同步结构后才能加载变体权重。
+比较同一数据划分、训练配置和验证协议下的 MAE、RMSE、F1@4/8/16px 及推理耗时。指定 `--variant ddg` 开启 DDG；旧基线检查点仍可加载评估，续训需显式传入 `--no-directional-detail`。新变体从相同 ImageNet 初始化独立训练，续训须保留开关。仓库内 evaluate.py / infer.py 从检查点自动恢复结构。独立 leaf-tip-inference 仓库需单独同步结构后才能加载变体权重。

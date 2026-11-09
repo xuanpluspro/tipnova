@@ -1,4 +1,4 @@
-"""Single-GPU SAHCC adaptation for RiceW3999 leaf-tip points."""
+"""Single-GPU CGTipNet training for leaf-tip points."""
 import argparse
 import json
 import logging
@@ -13,6 +13,7 @@ from runtime import resolve_device
 from torch.utils.data import DataLoader
 
 import checkpointing
+from check_data import check_disjoint, data_roots
 from counting_metrics import append_history
 from dataset import RiceW3999, collate, seed_worker
 from engine import evaluate, train_epoch
@@ -24,10 +25,10 @@ ROOT = Path(__file__).resolve().parent
 
 def parser():
     p = argparse.ArgumentParser(__doc__)
-    p.add_argument('--data-path', type=Path, default=ROOT/'data/RiceW3999')
+    p.add_argument('--data-path', type=Path, nargs='+', default=[ROOT/'data/RiceW3999'])
     p.add_argument('--pretrained', type=Path, default=ROOT/'pretrained/vgg16_bn-6c64b313.pth')
     p.add_argument('--scratch', action='store_true', help='Explicitly train without ImageNet initialization')
-    p.add_argument('--tag', default='ricew3999_tipfuse_ep50_bs32')
+    p.add_argument('--tag', default='ricew3999_cgtipnet_ep50_bs32')
     p.add_argument('--output-root', type=Path, default=ROOT/'exp')
     p.add_argument('--batch-size', type=int, default=32)
     p.add_argument('--epochs', type=int, default=50)
@@ -42,8 +43,8 @@ def parser():
     p.add_argument('--clip-grad', type=float, default=.1)
     p.add_argument('--point-weight', type=float, default=.0002)
     architecture = p.add_mutually_exclusive_group()
-    architecture.add_argument('--variant', choices=['tipfuse', 'ddg', 'sah'],
-                              help='Network variant (default: tipfuse)')
+    architecture.add_argument('--variant', choices=['cgtipnet', 'tipfuse', 'ddg', 'sah'],
+                              help='Network variant (default: cgtipnet; tipfuse is a legacy alias)')
     architecture.add_argument('--directional-detail', action=argparse.BooleanOptionalAction,
                               default=None, help='Legacy alias: on=ddg, off=sah')
     p.add_argument('--matcher', choices=['sah','baseline'], default='sah')
@@ -79,6 +80,11 @@ def main(args):
         args.cost_class < 0 or args.cost_point < 0 or args.cost_class + args.cost_point == 0 or
         args.point_weight < 0 or min(args.lr, args.lr_backbone) <= 0 or args.weight_decay < 0):
         raise ValueError('Invalid matching/loss/optimizer parameters')
+    roots = data_roots(args.data_path)
+    args.data_path = roots[0] if len(roots) == 1 else roots
+    training = RiceW3999(roots, 'train', args.patch_size, neighbors=args.neighbors)
+    validation = RiceW3999(roots, 'val', args.patch_size, neighbors=args.neighbors)
+    check_disjoint(training, validation, 'Train/val')
     device = resolve_device(args.device)
     if device.type == 'cuda' and not torch.cuda.is_available():
         raise RuntimeError('CUDA unavailable; use --device cpu only for diagnostics')
@@ -110,9 +116,11 @@ def main(args):
     pretrained = None if state or args.scratch else args.pretrained
     variant = args.variant
     if variant is None:
-        variant = {None: 'tipfuse', True: 'ddg', False: 'sah'}[args.directional_detail]
+        variant = {None: 'cgtipnet', True: 'ddg', False: 'sah'}[args.directional_detail]
+    if variant == 'tipfuse':
+        variant = 'cgtipnet'
     model = SAHCC(ModelConfig(directional_detail=variant == 'ddg',
-                              context_detail=variant == 'tipfuse'), pretrained).to(device)
+                              context_detail=variant == 'cgtipnet'), pretrained).to(device)
     criterion = PointCriterion(args).to(device)
     optimizer = torch.optim.AdamW([
         dict(params=[p for n,p in model.named_parameters() if not n.startswith('backbone.')]),
@@ -120,11 +128,6 @@ def main(args):
         lr=args.lr, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop, gamma=args.lr_gamma)
     scaler = torch.amp.GradScaler('cuda', enabled=args.amp)
-    training = RiceW3999(args.data_path, 'train', args.patch_size, neighbors=args.neighbors)
-    validation = RiceW3999(args.data_path, 'val', args.patch_size, neighbors=args.neighbors)
-    overlap = set(training.ids) & set(validation.ids)
-    if overlap:
-        raise ValueError(f'Train/val IDs overlap: {sorted(overlap)[:3]}')
     fingerprint = dict(train=training.fingerprint(), val=validation.fingerprint())
     train_loader = DataLoader(training, batch_size=args.batch_size, shuffle=True,
                               num_workers=args.workers, collate_fn=collate,
@@ -145,9 +148,9 @@ def main(args):
                   cuda_version=torch.version.cuda, device=str(device),
                   gpu=torch.cuda.get_device_name(device) if device.type=='cuda' else None)
     if start == 0:
-        (output/'config.json').write_text(json.dumps(config, indent=2)+'\n')
+        (output/'config.json').write_text(json.dumps(config, indent=2, default=str)+'\n')
     else:
-        (output/'resume_config.json').write_text(json.dumps(config, indent=2)+'\n')
+        (output/'resume_config.json').write_text(json.dumps(config, indent=2, default=str)+'\n')
     logger.info(f'Train={len(training)} val={len(validation)} | patch={args.patch_size} | '
                 f'Params={sum(p.numel() for p in model.parameters())/1e6:.2f}M | '
                 f'variant={variant} | matcher={args.matcher} source={args.point_source} | {config["precision"]}')

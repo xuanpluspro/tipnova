@@ -1,39 +1,14 @@
-# TipFuse experimental branch
+# CGTipNet
 
-TipFuse uses SAHCC anchors, point heads, matching and losses. Inspired by CSD, it
-extracts a local detail residual, but conditions it using the existing C5 branch.
-It does not use SPD-PAFPN or the full UniGC CSD block.
+CGTipNet 是基于 SAHCC 的植物叶尖定位与计数模型。它默认启用跨尺度上下文引导的细节融合：在 stride-8 的 C4 上提取局部细节，由 stride-16 的 C5 生成门控，然后将增强后的 C4 与 C5 融合。保留 SAHCC 的锚点、点预测头、匹配器和损失，默认新增 24,608 个参数。训练速度和显存需实测。
 
-The stride-8 C4 projection is reduced to 32 channels, then a 3×3 local mean is
-subtracted. A sigmoid gate is generated from stride-16 C5 and upsampled. The
-gated detail is projected back to 256 channels and added to C4 before C4/C5
-fusion. Only the final projection is zero-initialized. At the default widths
-TipFuse adds 24,608 parameters over the SAH baseline. Runtime and accuracy
-require GPU measurements.
+默认变体为 `--variant cgtipnet`；`--variant tipfuse` 是旧名称的兼容别名。`--variant sah` 是同仓库 SAHCC 对照，`--variant ddg` 是原 TipNova 方向细节门控对照。独立的 leaf-tip-inference 仓库需同步结构后才可使用 CGTipNet 权重。
 
-```bash
-BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh tipfuse_ep50_bs40 --variant tipfuse
-BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh sah_control_ep50_bs40 --variant sah
-BATCH_SIZE=40 EPOCHS=50 bash train_ricew3999.sh ddg_control_ep50_bs40 --variant ddg
-```
-
-TipFuse is the default on this branch. Use distinct experiment tags and the same
-data, pretrained weights, seed and precision. Resume with the same variant.
-Evaluate MAE, RMSE, F1@4/8/16px, seconds per epoch and peak GPU memory.
-The local evaluate.py and infer.py reconstruct the variant from model_config.
-The separate leaf-tip-inference repository does not include TipFuse yet.
-
-CSD reference: [UniGC implementation](https://github.com/xiaofengxie-dl/UniGC/blob/main/models/csd_p2pnet/models/csd_block.py).
-
----
-
-# TipNova
-
-TipNova 是基于 SAHCC 的植物叶尖定位与计数模型，在 C4/C5 融合前加入方向细节门控（DDG）。在本实验分支可用 `--variant ddg` 运行。
+设计参考：[UniGC 的 CSD 实现](https://github.com/xiaofengxie-dl/UniGC/blob/main/models/csd_p2pnet/models/csd_block.py)。
 
 数据集 RiceW3999：FoMo4Wheat Rice Leaf 1,700 张水稻图像、Li 等（2023）500 张小麦图像、Yang 等（2025）1,799 张小麦图像。沿用原划分（训练 3,429 张，验证 570 张），支持分来源指标。数据与权重不随仓库分发。
 
-模型结构见 [架构图](docs/tipnova_architecture.svg)。精度、吞吐和显存尚未实测。
+原 DDG 对照结构见 [架构图](docs/tipnova_architecture.svg)。CGTipNet 的精度、吞吐和显存尚未实测。
 
 ## GPUFree 安装
 
@@ -79,7 +54,7 @@ python check_data.py --data-path /root/gpufree-data/p2rloss/data/RiceW3999
 ```bash
 DATA_PATH=/root/gpufree-data/p2rloss/data/RiceW3999 \
 BATCH_SIZE=32 EPOCHS=50 WORKERS=4 \
-bash train_ricew3999.sh ricew3999_tipnova_ep50_bs32_run1
+bash train_ricew3999.sh ricew3999_cgtipnet_ep50_bs32_run1
 ```
 
 使用本仓库 data 下的数据时，可以省略 DATA_PATH。推荐在已安装的 tmux 会话中启动。默认 batch 32 是为你的 48GB 显存设置的起点，并非已测显存保证；OOM 时改为 16，并使用新实验名。可追加 `--amp` 开启 CUDA FP16；默认 FP32。不要运行中途修改训练代码或升级 torch。
@@ -103,6 +78,21 @@ bash train_ricew3999.sh ricew3999_tipnova_ep50_bs32_run1
 
 随机缩放范围 0.7–1.3，保证短边不小于裁块尺寸；随机水平翻转。512 原图为保证可裁块，实际缩放会限制在不缩小的范围，1024 图则可在完整范围缩放。每轮是每张原图抽取一次裁块，并非遍历该图所有区域。验证不缩放，只补齐到 16 的倍数，并移除原图边界外的预测。没有距离 NMS，以免合并相邻的真实叶尖。
 
+### 多目录混合训练
+
+每个根目录保留自己的 `JPEGImages/`、`PointAnnotations/`、`ImageSets/train.txt` 和 `ImageSets/val.txt`。程序拼接样本清单，使用一个打乱的训练集和一个验证集；无需复制图片、合并目录或改名。验证 MAE、RMSE、F1 按合并后的全部样本统一计算，仍会单独输出来源诊断表。默认按样本数量采样。
+
+```bash
+DATA=/work/home/mx123/RiceAndWheatSet
+python check_data.py --data-path "$DATA/ricetip" "$DATA/wheat500"
+BATCH_SIZE=32 EPOCHS=50 bash train_ricew3999.sh rice_wheat_cgtipnet \
+  --data-path "$DATA/ricetip" "$DATA/wheat500"
+```
+
+将路径换成服务器上的实际目录名。单目录仍可用原命令。多个目录也可传给 `evaluate.py --data-path`。续训时保持目录和参数顺序一致。不要同时传入 RiceW3999 和其已包含的子集；如怀疑跨来源重复，可先对多个目录运行 `check_data.py --check-overlap`。该检查只能发现完全相同的解码像素，重叠裁块仍需检查原图来源。
+
+原图尺寸可以不同。训练在线缩放和随机裁成统一的 512×512（可通过 `--patch-size` 改为不小于 32 的 16 的倍数），同步变换点坐标；验证每次处理一张原尺寸图，右下补齐到 16 的倍数且每边至少 32 像素，计算指标时使用原图范围。
+
 ## 断点恢复
 
 同一条命令、同一实验名再次执行，会自动恢复 `output/checkpoint.pth`，不要求再次读取 ImageNet 权重。也可以显式指定：
@@ -125,7 +115,7 @@ python train.py --data-path /path/RiceW3999 --tag original_tag \
 - `metrics_history.csv`、`best_metrics.json`：验证历史和最佳验证指标。
 - `evaluation/epoch_XXXX/metrics.json`、`per_image.csv`、`per_source.csv`：协议、逐图结果及来源分组统计。
 
-启动脚本另追加保存 `exp/<tag>/train.log/running.log`。MAE/RMSE 越低越好；Precision、Recall、F1@4/8/16px 越高越好，比例范围 0–1。定位评估最大化容差内一对一匹配数，再最小化距离，汇总全数据集 TP/FP/FN。来源分组按文件名前缀 `__` 之前提取，仅用于分析，不改变训练划分。JSON 指标位于 `metrics` 字段。
+启动脚本另追加保存 `exp/<tag>/train.log/running.log`。MAE/RMSE 越低越好；Precision、Recall、F1@4/8/16px 越高越好，比例范围 0–1。定位评估最大化容差内一对一匹配数，再最小化距离，汇总全数据集 TP/FP/FN。单目录时按文件名前缀 `__` 之前提取来源，多目录时按数据根目录分组，仅用于分析，不改变训练划分。JSON 指标位于 `metrics` 字段。
 
 ## 单独评估和推理
 
@@ -149,7 +139,7 @@ python infer.py --checkpoint exp/<tag>/output/best_checkpoint.pth \
 
 ```bash
 # SAH + 锚点：默认
-bash train_ricew3999.sh sah_anchor
+bash train_ricew3999.sh sah_anchor --variant sah
 # 普通匹配 + 锚点：隔离匹配代价影响
 bash train_ricew3999.sh baseline_anchor --matcher baseline --point-source anchor_points --cost-point 0.05
 # 普通匹配 + 预测点：官方普通匹配默认

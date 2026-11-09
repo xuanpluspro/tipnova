@@ -3,7 +3,6 @@ import hashlib
 import json
 import math
 import random
-from pathlib import Path
 
 import numpy as np
 import torch
@@ -12,7 +11,7 @@ from PIL import Image, ImageOps
 from scipy.spatial import cKDTree
 from torch.utils.data import Dataset
 
-EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.tif', '.tiff'}
+from check_data import EXTENSIONS, combine_splits, data_roots
 MEAN = torch.tensor([.485, .456, .406]).view(3, 1, 1)
 STD = torch.tensor([.229, .224, .225]).view(3, 1, 1)
 
@@ -26,7 +25,8 @@ def pad_tensor(image):
     height, width = image.shape[-2:]
     # Zero in normalized space is ImageNet-mean RGB. Original dimensions
     # are carried separately, and predictions outside them are discarded.
-    return F.pad(image, (0, (-width) % 16, 0, (-height) % 16))
+    return F.pad(image, (0, max(32-width, (-width) % 16),
+                         0, max(32-height, (-height) % 16)))
 
 
 def read_points(path, width, height):
@@ -46,7 +46,7 @@ def read_points(path, width, height):
 
 class RiceW3999(Dataset):
     def __init__(self, root, split='train', patch_size=512, augment=True, neighbors=4):
-        self.root, self.split = Path(root).expanduser().resolve(), split
+        self.roots, self.split = data_roots(root), split
         self.training = split == 'train' and augment
         self.patch_size = patch_size
         self.neighbors = int(neighbors)
@@ -55,26 +55,8 @@ class RiceW3999(Dataset):
         self._spacing_cache = {}
         if patch_size < 32 or patch_size % 16:
             raise ValueError('patch_size must be >=32 and a multiple of 16')
-        self.manifest = self.root / 'ImageSets' / f'{split}.txt'
-        ids = [line.strip() for line in self.manifest.read_text(encoding='utf-8-sig').splitlines()
-               if line.strip()]
-        if not ids or len(ids) != len(set(ids)):
-            raise ValueError(f'Empty or duplicate IDs in {self.manifest}')
-        images = {}
-        for path in (self.root / 'JPEGImages').iterdir():
-            if path.is_file() and path.suffix.lower() in EXTENSIONS:
-                if path.stem in images:
-                    raise ValueError(f'Ambiguous image ID {path.stem}; multiple extensions')
-                images[path.stem] = path
-        self.samples = []
-        self.ids = ids
-        for name in ids:
-            if '/' in name or '\\' in name or name in ('.', '..'):
-                raise ValueError(f'Expected a filename stem, got {name!r}')
-            annotation = self.root / 'PointAnnotations' / f'{name}.txt'
-            if name not in images or not annotation.is_file():
-                raise FileNotFoundError(f'Missing image or annotation for {name!r}')
-            self.samples.append((name, images[name], annotation))
+        listing = combine_splits(self.roots, split)
+        self.samples, self.ids = listing.samples, listing.ids
 
     def fingerprint(self):
         """Hash IDs, annotation bytes, image sizes/mtimes to detect changed inputs.

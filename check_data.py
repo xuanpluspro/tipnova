@@ -64,6 +64,39 @@ def read_split(root, split, images):
     return SimpleNamespace(ids=ids, samples=samples)
 
 
+def data_roots(root):
+    paths = [root] if isinstance(root, (str, Path)) else root
+    roots = tuple(Path(path).expanduser().resolve() for path in paths)
+    if not roots or len(roots) != len(set(roots)):
+        raise ValueError('Provide one or more distinct dataset roots')
+    return roots
+
+
+def combine_splits(roots, split, indexes=None):
+    """Resolve each manifest against its own dataset, then join sample lists."""
+    if indexes is None:
+        indexes = [image_index(root) for root in roots]
+    samples = []
+    sources = [root.name.replace('__', '_') for root in roots]
+    if len(set(sources)) != len(sources):
+        sources = [f'{i+1}:{name}' for i, name in enumerate(sources)]
+    for root, images, source in zip(roots, indexes, sources):
+        for name, image, annotation in read_split(root, split, images).samples:
+            sample_id = f'{source}__{name}' if len(roots) > 1 else name
+            samples.append((sample_id, image, annotation))
+    return SimpleNamespace(ids=[name for name, _, _ in samples], samples=samples)
+
+
+def check_disjoint(left, right, label):
+    overlap = set(left.ids) & set(right.ids)
+    if overlap:
+        raise ValueError(f'{label} IDs overlap: {sorted(overlap)[:3]}')
+    images = {path.resolve() for _, path, _ in left.samples}
+    for _, path, _ in right.samples:
+        if path.resolve() in images:
+            raise ValueError(f'{label} share the same image path: {path}')
+
+
 @contextmanager
 def progress_bar(iterable, desc, unit):
     try:
@@ -84,21 +117,20 @@ def progress_bar(iterable, desc, unit):
 
 
 def audit(root, check_overlap=False, *, decode=False, show_progress=True):
-    root = Path(root).expanduser().resolve()
-    reports, ids, image_hashes = {}, {}, {}
+    roots = data_roots(root)
+    reports, image_hashes = {}, {}
     datasets = {}
-    images = image_index(root)
+    indexes = [image_index(path) for path in roots]
     for split in ('train', 'val', 'test'):
-        if (root/'ImageSets'/f'{split}.txt').is_file():
-            datasets[split] = read_split(root, split, images)
-            ids[split] = set(datasets[split].ids)
-    if 'train' not in datasets or 'val' not in datasets:
-        raise ValueError('Both train.txt and val.txt are required')
-    # Detect cheap manifest errors before reading thousands of image headers.
-    for left in ids:
-        for right in ids:
-            if left < right and ids[left] & ids[right]:
-                raise ValueError(f'{left}/{right} IDs overlap')
+        present = [(path/'ImageSets'/f'{split}.txt').is_file() for path in roots]
+        if split in ('train', 'val') or all(present):
+            if not all(present):
+                raise ValueError(f'Expected {split}.txt in each dataset root')
+            datasets[split] = combine_splits(roots, split, indexes)
+    for left in datasets:
+        for right in datasets:
+            if left < right:
+                check_disjoint(datasets[left], datasets[right], f'{left}/{right}')
     for split, dataset in datasets.items():
         counts, sizes = [], {}
         mode = 'pixels' if check_overlap else 'decode' if decode else 'headers'
@@ -137,7 +169,7 @@ def audit(root, check_overlap=False, *, decode=False, show_progress=True):
 
 if __name__ == '__main__':
     p = argparse.ArgumentParser(__doc__)
-    p.add_argument('--data-path', type=Path, required=True)
+    p.add_argument('--data-path', type=Path, nargs='+', required=True)
     p.add_argument('--decode', action='store_true', help='Fully decode images to detect pixel-data corruption; slower')
     p.add_argument('--check-overlap', action='store_true', help='Fully decode and hash pixels to detect duplicates; slower')
     p.add_argument('--no-progress', action='store_true', help='Disable terminal progress bars')

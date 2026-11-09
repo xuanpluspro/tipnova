@@ -26,7 +26,7 @@ def load_model(checkpoint, device):
 def main():
     p = argparse.ArgumentParser(__doc__)
     p.add_argument('--checkpoint', type=Path, required=True)
-    p.add_argument('--data-path', type=Path, required=True)
+    p.add_argument('--data-path', type=Path, nargs='+', required=True)
     p.add_argument('--split', choices=['val','test'], default='val')
     p.add_argument('--output', type=Path, default=Path('evaluation'))
     p.add_argument('--device', default='cuda')
